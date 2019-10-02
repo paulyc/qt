@@ -43,6 +43,10 @@
 #include "qlibrary.h"
 #include "qdebug.h"
 
+#ifndef UCHAR_TYPE
+#define UCHAR_TYPE unsigned short
+#endif
+
 #include "unicode/uversion.h"
 #include "unicode/ucol.h"
 
