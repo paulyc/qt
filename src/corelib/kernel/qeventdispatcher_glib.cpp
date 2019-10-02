@@ -248,13 +248,22 @@ struct GPostEventSource
     GSource source;
     QAtomicInt serialNumber;
     int lastSerialNumber;
+    QEventLoop::ProcessEventsFlags processEventsFlags;
     QEventDispatcherGlibPrivate *d;
 };
 
 static gboolean postEventSourcePrepare(GSource *s, gint *timeout)
 {
+    GPostEventSource *source = reinterpret_cast<GPostEventSource *>(s);
     QThreadData *data = QThreadData::current();
     if (!data)
+        return false;
+
+    QEventLoop::ProcessEventsFlags excludeAllFlags
+        = QEventLoop::ExcludeUserInputEvents
+        | QEventLoop::ExcludeSocketNotifiers
+        | QEventLoop::X11ExcludeTimers;
+    if ((source->processEventsFlags & excludeAllFlags) == excludeAllFlags)
         return false;
 
     gint dummy;
@@ -263,7 +272,6 @@ static gboolean postEventSourcePrepare(GSource *s, gint *timeout)
     const bool canWait = data->canWaitLocked();
     *timeout = canWait ? -1 : 0;
 
-    GPostEventSource *source = reinterpret_cast<GPostEventSource *>(s);
     return (!canWait
             || (source->serialNumber != source->lastSerialNumber));
 }
@@ -277,8 +285,14 @@ static gboolean postEventSourceDispatch(GSource *s, GSourceFunc, gpointer)
 {
     GPostEventSource *source = reinterpret_cast<GPostEventSource *>(s);
     source->lastSerialNumber = source->serialNumber;
-    QCoreApplication::sendPostedEvents();
-    source->d->runTimersOnceWithNormalPriority();
+    QEventLoop::ProcessEventsFlags excludeAllFlags
+        = QEventLoop::ExcludeUserInputEvents
+        | QEventLoop::ExcludeSocketNotifiers
+        | QEventLoop::X11ExcludeTimers;
+    if ((source->processEventsFlags & excludeAllFlags) != excludeAllFlags) {
+        QCoreApplication::sendPostedEvents();
+        source->d->runTimersOnceWithNormalPriority();
+    }
     return true; // i dunno, george...
 }
 
@@ -322,6 +336,7 @@ QEventDispatcherGlibPrivate::QEventDispatcherGlibPrivate(GMainContext *context)
     postEventSource = reinterpret_cast<GPostEventSource *>(g_source_new(&postEventSourceFuncs,
                                                                         sizeof(GPostEventSource)));
     postEventSource->serialNumber = 1;
+    postEventSource->processEventsFlags = QEventLoop::AllEvents;
     postEventSource->d = this;
     g_source_set_can_recurse(&postEventSource->source, true);
     g_source_attach(&postEventSource->source, mainContext);
@@ -415,6 +430,7 @@ bool QEventDispatcherGlib::processEvents(QEventLoop::ProcessEventsFlags flags)
 
     // tell postEventSourcePrepare() and timerSource about any new flags
     QEventLoop::ProcessEventsFlags savedFlags = d->timerSource->processEventsFlags;
+    d->postEventSource->processEventsFlags = flags;
     d->timerSource->processEventsFlags = flags;
 
     if (!(flags & QEventLoop::EventLoopExec)) {
@@ -426,6 +442,7 @@ bool QEventDispatcherGlib::processEvents(QEventLoop::ProcessEventsFlags flags)
     while (!result && canWait)
         result = g_main_context_iteration(d->mainContext, canWait);
 
+    d->postEventSource->processEventsFlags = savedFlags;
     d->timerSource->processEventsFlags = savedFlags;
 
     if (canWait)
